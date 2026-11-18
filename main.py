@@ -71,6 +71,25 @@ def clamp_quantiles(values):
     return out
 
 
+def forecast_is_valid(forecast, case):
+    """True when a forecast matches the answer format exactly: one row per forecast
+    hour, five finite quantiles per row, each above 0 and at most MAX_VIEWERS, and
+    non-decreasing within the row. An invalid case scores as flat persistence and
+    takes no prize, so the caller checks before anything is written."""
+    rows = forecast["hours"]
+    if len(rows) != len(case["forecast"]):
+        return False
+    for row, want in zip(rows, case["forecast"]):
+        if row["hour"] != want["hour"] or len(row["q"]) != len(LEVELS):
+            return False
+        quantiles = row["q"]
+        if any(not math.isfinite(q) or q <= 0 or q > MAX_VIEWERS for q in quantiles):
+            return False
+        if any(b < a for a, b in zip(quantiles, quantiles[1:])):
+            return False
+    return True
+
+
 def forecast_case(case, name):
     """One case's forecast: {"hours": [{hour, q}, ...]} for its forecast rows."""
     if case["levels"] != LEVELS:
@@ -81,7 +100,11 @@ def forecast_case(case, name):
     p1 = max(1, first["viewers"])
 
     pool = model.build_pool(case)
-    curves = model.forecast_curves(pool, p1, LEVELS) if pool else None
+    curves = (
+        model.forecast_curves(pool, p1, model.target_is_rolling(case), LEVELS)
+        if pool
+        else None
+    )
 
     rows = []
     for row in case["forecast"]:
@@ -92,7 +115,16 @@ def forecast_case(case, name):
             raw = [p1 * math.exp(x) for x in curves[hour]]
             quantiles = clamp_quantiles(raw)
         rows.append({"hour": hour, "q": quantiles})
-    return {"hours": rows}
+    forecast = {"hours": rows}
+    if not forecast_is_valid(forecast, case):
+        # Never write an invalid file: persistence rows are always in format.
+        forecast = {
+            "hours": [
+                {"hour": row["hour"], "q": persistence_quantiles(p1, row["hour"])}
+                for row in case["forecast"]
+            ]
+        }
+    return forecast
 
 
 def main():
