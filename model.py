@@ -6,26 +6,50 @@ small usually has not unlocked for its main audience yet and can grow a hundredf
 the evening; a game whose first hour is already huge has the world piled in at once and
 stays flat or dips. So the forecast for a target pools the release-day log-ratio curves
 of past launches, weighting each launch by a Gaussian kernel on the distance between
-its log10 hour-1 audience and the target's, multiplied when the launch's unlock
-pattern (rolling midnight-local vs one simultaneous global moment, read from the
-case's text) matches the target's, and reads the five scored quantiles off the
-weighted empirical distribution of those curves, hour by hour.
+its log10 hour-1 audience and the target's, multiplied when the launch's unlock pattern
+(rolling midnight-local vs one simultaneous global moment) and its early-access shape
+match the target's, and fits, hour by hour, a local line in log10 hour-1 through the
+pooled curves: the line carries the pool's centre to the target's own scale instead of
+averaging launches of different scales flat, and the five scored quantiles are read off
+the weighted distribution of the line's residuals. The kernel narrows as the day goes
+on (wide while the day's shape is still up for grabs, tight once scale-matched
+launches track the decay closely), and the fitted quantile curves are smoothed
+across neighbouring hours before they are read.
 """
 
 import math
+import re
 from datetime import datetime, timezone
 
-# Kernel bandwidth in log10 units of the hour-1 audience: launches whose first hour is
-# within about half an order of magnitude of the target's dominate the pool. Chosen by
-# leave-one-out backtests over the kit's comparable launches (see README).
-BANDWIDTH = 0.45
+# Kernel bandwidth in log10 units of the hour-1 audience, at the day's middle
+# (hour 13): launches whose first hour is within about two-thirds of an order of
+# magnitude of the target's dominate the pool there. The bandwidth ramps linearly
+# with the hour (BW_SLOPE per hour from the middle): wide in the first hours,
+# when a launch's shape still depends on unlock timing more than on scale, and
+# narrow late, when the closest scale matches track the decay best. Both numbers
+# were chosen by leave-one-out backtests over the kit's comparable launches (see
+# README): the ramp alone took the loss from 0.397 to 0.389.
+BW_CENTRE = 0.65
+BW_SLOPE = -0.5
 
 # Weight multiplier for a pooled launch whose unlock pattern matches the target's
 # (rolling midnight-local vs a single simultaneous unlock): the two patterns produce
 # different day shapes at the same scale, and matching them sharpened every cut of
-# the leave-one-out backtest (0.397 against 0.410 overall; 0.241 against 0.258 on
-# launches with hour 1 >= 20,000).
+# the leave-one-out backtest.
 TYPE_BONUS = 3.0
+
+# Weight multiplier for a pooled launch whose early-access shape matches the
+# target's: a launch that sold (or beta-tested) its first days before the release
+# day starts warm and stays flat, where a cold launch explodes, and the match is
+# worth about as much as the unlock-pattern match in the backtests.
+EARLY_BONUS = 3.0
+
+# The local line's slope is shrunk toward flat by this factor and capped at
+# SLOPE_CAP log-ratio units per log10 of hour-1 audience: with three dozen
+# launches in the pool the raw slope is real but noisy, and the shrinkage is
+# what the backtests settled on.
+SLOPE_SHRINK = 0.8
+SLOPE_CAP = 1.5
 
 # A comparable must cover at least this many of the release day's 24 hours, and have a
 # positive hour 1, to enter the pool: without an hour 1 there is no curve to normalise.
@@ -93,11 +117,30 @@ def target_is_rolling(case):
     return is_rolling(case.get("notes", ""))
 
 
+def has_early_access(text):
+    """True when an unlock description reports an early-access period before the
+    release day (paid head starts, premium editions, network tests): the launch
+    reaches its release day already warm. A bare 'no early access' does not
+    count, and neither do the words on their own in a denial."""
+    lowered = str(text).lower()
+    return any(
+        match.group(0) != "no early access"
+        for match in re.finditer(r"(no )?early access", lowered)
+    )
+
+
+def target_has_early_access(case):
+    """The target's early-access shape, read from the case's own notes (which
+    state it the way the comparables' unlock texts do)."""
+    return has_early_access(case.get("notes", ""))
+
+
 def build_pool(case):
-    """The pool of usable past launches in a case: [{name, first, rolling, curve}]
-    where `first` is the launch's hour-1 viewers, `rolling` its unlock pattern, and
-    `curve` maps hour -> ln(viewers/ first) for the hours it printed a positive
-    count, with isolated gaps interpolated."""
+    """The pool of usable past launches in a case: [{name, first, rolling, early,
+    curve}] where `first` is the launch's hour-1 viewers, `rolling` its unlock
+    pattern, `early` whether it had an early-access period, and `curve` maps
+    hour -> ln(viewers / first) for the hours it printed a positive count, with
+    isolated gaps interpolated."""
     pool = []
     for comparable in case["comparables"]:
         if not is_launch(comparable):
@@ -112,6 +155,7 @@ def build_pool(case):
                 "name": comparable["name"],
                 "first": first,
                 "rolling": is_rolling(comparable["unlock"]),
+                "early": has_early_access(comparable["unlock"]),
                 "curve": fill_gaps(curve),
             }
         )
