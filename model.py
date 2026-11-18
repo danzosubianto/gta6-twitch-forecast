@@ -162,16 +162,28 @@ def build_pool(case):
     return pool
 
 
-def kernel_weights(pool, target_first, target_rolling):
-    """One weight per pooled launch: a Gaussian kernel on log10 hour-1 distance,
-    multiplied by TYPE_BONUS when the launch's unlock pattern matches the target's."""
+def bandwidth_at(hour):
+    """The kernel bandwidth for one hour of the day: BW_CENTRE at hour 13,
+    ramping by BW_SLOPE of itself across the day's span, so the first hours
+    pool widely (0.975) and the last hours pool tightly (0.325)."""
+    return BW_CENTRE * (1.0 + BW_SLOPE * (hour - 13) / 11.0)
+
+
+def kernel_weights(pool, target_first, target_rolling, target_early, hour):
+    """One weight per pooled launch, for one hour: a Gaussian kernel on log10
+    hour-1 distance at that hour's bandwidth, multiplied by TYPE_BONUS when
+    the launch's unlock pattern matches the target's and by EARLY_BONUS when
+    its early-access shape does."""
     centre = math.log10(max(1, target_first))
+    bandwidth = bandwidth_at(hour)
     weights = []
     for launch in pool:
-        distance = (math.log10(launch["first"]) - centre) / BANDWIDTH
+        distance = (math.log10(launch["first"]) - centre) / bandwidth
         weight = math.exp(-0.5 * distance * distance)
         if launch["rolling"] == target_rolling:
             weight *= TYPE_BONUS
+        if launch["early"] == target_early:
+            weight *= EARLY_BONUS
         weights.append(weight)
     return weights
 
@@ -196,22 +208,80 @@ def weighted_quantile(pairs, tau):
     return ordered[-1][0]
 
 
-def forecast_curves(pool, target_first, target_rolling, levels):
+def local_quantiles(rows, centre, levels):
+    """The scored quantiles of one hour's log ratio at the target's scale.
+
+    `rows` holds (log10 hour-1, log ratio, weight) for each pooled launch that
+    printed this hour. A weighted line is fitted through the rows: its slope
+    says how the day's shape tilts with scale, and it is shrunk by
+    SLOPE_SHRINK and capped at SLOPE_CAP because three dozen launches make a
+    noisy line. The quantiles are the weighted quantiles of the rows'
+    residuals around the line, carried to the target's own log10 hour-1
+    (`centre`), so the spread comes from how launches scattered around their
+    shared tilt, not from the tilt itself.
+    """
+    total = sum(w for _, _, w in rows)
+    x_mean = sum(w * x for x, _, w in rows) / total
+    y_mean = sum(w * y for _, y, w in rows) / total
+    spread = sum(w * (x - x_mean) ** 2 for x, _, w in rows)
+    if spread > 1e-9:
+        slope = (
+            sum(w * (x - x_mean) * (y - y_mean) for x, y, w in rows) / spread
+        )
+    else:
+        slope = 0.0
+    slope = max(-SLOPE_CAP, min(SLOPE_CAP, SLOPE_SHRINK * slope))
+    base = y_mean + slope * (centre - x_mean)
+    residuals = [
+        (y - (y_mean + slope * (x - x_mean)), w) for x, y, w in rows
+    ]
+    return [base + weighted_quantile(residuals, tau) for tau in levels]
+
+
+def smooth_curves(curves):
+    """Smooth each level's log-ratio curve across neighbouring hours with
+    triangular weights (1, 2, 3, 2, 1 over two hours either side): the pool
+    behind one hour is a slightly different set of launches than the pool
+    behind the next, and the smoothing irons out the steps that difference
+    prints into the curves. At the day's edges the weights that fall outside
+    hours 2..24 are dropped and the rest renormalised."""
+    weights = (1.0, 2.0, 3.0, 2.0, 1.0)
+    smoothed = {}
+    for hour in range(2, 25):
+        acc = None
+        total = 0.0
+        for step, weight in zip(range(-2, 3), weights):
+            near = hour + step
+            if near not in curves:
+                continue
+            if acc is None:
+                acc = [0.0] * len(curves[hour])
+            for i, value in enumerate(curves[near]):
+                acc[i] += weight * value
+            total += weight
+        smoothed[hour] = [value / total for value in acc]
+    return smoothed
+
+
+def forecast_curves(pool, target_first, target_rolling, target_early, levels):
     """{hour: [log-ratio quantile per level]} for hours 2..24, from the weighted pool.
 
     Hours no pooled launch printed fall back to a flat 0.0 log ratio at every level;
     the caller replaces the whole forecast with persistence if the pool is empty.
     """
-    weights = kernel_weights(pool, target_first, target_rolling)
+    centre = math.log10(max(1, target_first))
     curves = {}
     for hour in range(2, 25):
-        pairs = [
-            (launch["curve"][hour], w)
+        weights = kernel_weights(
+            pool, target_first, target_rolling, target_early, hour
+        )
+        rows = [
+            (math.log10(launch["first"]), launch["curve"][hour], w)
             for launch, w in zip(pool, weights)
             if hour in launch["curve"]
         ]
-        if not pairs:
+        if not rows:
             curves[hour] = [0.0] * len(levels)
             continue
-        curves[hour] = [weighted_quantile(pairs, tau) for tau in levels]
-    return curves
+        curves[hour] = local_quantiles(rows, centre, levels)
+    return smooth_curves(curves)

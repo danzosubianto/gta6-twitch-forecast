@@ -6,9 +6,11 @@ writes, for hours 2 to 24 of the release day, the five quantiles (5%, 25%, 50%, 
 
 The model (model.py): the target's hour-1 print anchors the level; the day's shape
 comes from past big launches in the case's `comparables`, each normalised to its own
-hour 1 and weighted by a Gaussian kernel on log10 hour-1 distance, so launches of a
-similar scale dominate. The scored quantiles are the weighted empirical quantiles of
-those launches' log-ratio curves. With no usable comparable, the entry falls back to
+hour 1 and weighted by a Gaussian kernel on log10 hour-1 distance (narrowing as the
+day goes on), with matching unlock patterns and early-access shapes weighted up. A
+local line in log10 hour-1 is fitted through each hour's pooled curves and the
+scored quantiles are read off its residuals at the target's scale, then smoothed
+across neighbouring hours. With no usable comparable, the entry falls back to
 persistence (every hour at hour 1's count, random-walk spread), the house baseline.
 
 How the grader runs it: `python3 -P -s /bot/main.py` (PYTHONHASHSEED=0), Python 3.13,
@@ -101,7 +103,13 @@ def forecast_case(case, name):
 
     pool = model.build_pool(case)
     curves = (
-        model.forecast_curves(pool, p1, model.target_is_rolling(case), LEVELS)
+        model.forecast_curves(
+            pool,
+            p1,
+            model.target_is_rolling(case),
+            model.target_has_early_access(case),
+            LEVELS,
+        )
         if pool
         else None
     )
