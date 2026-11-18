@@ -11,17 +11,19 @@ quantiles of the viewer count for each of hours 2 to 24.
 
 The model is a scale-matched pool of past launch curves. Each comparable launch is
 normalised to its own hour 1, giving a log-ratio curve for the day; the launches are
-then weighted by a Gaussian kernel (bandwidth 0.45) on the distance between their
-log10 hour-1 audience and the target's, because a launch whose first hour was small
-(it had not unlocked for its main audience yet) grows explosively while a launch
-whose first hour was already huge stays flat — and multiplied by 3 when the launch's
-unlock pattern (rolling midnight-local vs one simultaneous global moment) matches
-the target's. The forecast quantiles are the weighted empirical quantiles of those
-curves, hour by hour, anchored on the target's hour-1 print. In leave-one-out
-backtests over the kit's 37 usable comparable launches the method's mean pinball
-loss is 0.397 against the persistence baseline's 0.930 (0.241 against 0.321 on
-launches with hour 1 ≥ 20,000, the scale of the practice targets). Python 3.13,
-standard library only, deterministic, offline.
+then weighted by a Gaussian kernel on the distance between their log10 hour-1
+audience and the target's — wide in the day's first hours (0.975), narrowing to
+0.325 by hour 24, because early shape owes more to unlock timing than to scale
+while late decay tracks scale closely — multiplied by 3 when the launch's unlock
+pattern (rolling midnight-local vs one simultaneous global moment) matches the
+target's, and by 3 again when its early-access shape matches. Each hour's forecast
+is a local line fitted through the pooled curves in log10 hour-1 (slope shrunk and
+capped), with the five quantiles read off the weighted residuals at the target's
+own scale and smoothed across neighbouring hours, anchored on the target's hour-1
+print. In leave-one-out backtests over the kit's 37 usable comparable launches the
+method's mean pinball loss is 0.359 against the persistence baseline's 0.930
+(0.229 against 0.321 on launches with hour 1 ≥ 20,000, the scale of the practice
+targets). Python 3.13, standard library only, deterministic, offline.
 
 ## Run it
 
